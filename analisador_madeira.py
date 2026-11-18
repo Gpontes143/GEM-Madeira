@@ -18,14 +18,25 @@ from PIL import Image, ImageOps
 from pydantic import BaseModel, Field, model_validator
 
 # --- 1. Caminhos Seguros e Configuração de Ambiente ---
-
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
 PASTA_PROCESSADAS = BASE_DIR / "inspecoes_processadas"
 EXTENSOES_ACEITAS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
-
 # --- 2. Contratos de Dados (Pydantic Schemas) ---
+class DimensoesEscalaRegua(BaseModel):
+    comprimento_cm: Optional[float] = Field(
+        None, ge=0, description="Comprimento estimado da peça em centímetros, calculado usando a régua de 30cm como base."
+    )
+    largura_cm: Optional[float] = Field(
+        None, ge=0, description="Largura estimada da peça em centímetros, calculada usando a régua de 30cm como base."
+    )
+    regua_30cm_detectada: bool = Field(
+        description="True se a régua padrão de 30cm foi encontrada na imagem para calibração métrica."
+    )
+    observacao_escala: str = Field(
+        description="Breve relato sobre a leitura da régua e a proporção aplicada."
+    )
 
 class EstatisticasFendas(BaseModel):
     quantidade: int = Field(
@@ -102,6 +113,7 @@ class LaudoTecnicoMadeira(BaseModel):
     qualidade_imagem_suficiente: bool = Field(
         description="True se a foto permite inspecionar a madeira; False se inadequada.",
     )
+    dimensoes: DimensoesEscalaRegua
     fendas: EstatisticasFendas
     nos: EstatisticasNos
     empenamento: AnaliseEmpenamento
@@ -131,13 +143,14 @@ class RespostaBackend(BaseModel):
 
 SYSTEM_PROMPT = """
 Você é um inspetor técnico sênior de qualidade de madeira serrada e beneficiada.
-Analise as imagens fornecidas buscando exclusivamente não conformidades físicas: fendas/rachaduras, nós (firmes vs. soltos/mortos) e empenamento.
+Analise as imagens fornecidas buscando não conformidades físicas (fendas, nós, empenamento) E UTILIZANDO A RÉGUA DE 30CM COMO BASE DE ESCALA.
 
 Regras técnicas obrigatórias:
-1. Não confunda veios naturais escuros, variações de cerne/alburno ou marcas normais de serra com fendas.
-2. Fendas têm abertura física ou sombra de profundidade longitudinal.
-3. Empenamento (arqueamento, encanoamento, torção) exige visão de borda/topo ou referência de superfície plana. Se houver apenas uma foto frontal chapada sem curvatura lateral visível, defina status como 'inconclusivo_angulo_foto' e tipo como 'indeterminado_sem_vista_topo'.
-4. Se a imagem estiver muito tremida, escura ou não mostrar madeira claramente, marque qualidade_imagem_suficiente=False e conformidade='INCONCLUSIVO_FOTO_INADEQUADA'.
+1. **Calibração por Régua Física (30cm):** Localize a régua padrão de 30 cm posicionada na imagem. Utilize as marcações dela como referência absoluta de escala para calcular com precisão métrica o comprimento e a largura reais da peça. Se a régua não for encontrada, defina `regua_30cm_detectada=false`.
+2. Não confunda veios naturais escuros, variações de cerne/alburno ou marcas normais de serra com fendas.
+3. Fendas têm abertura física ou sombra de profundidade longitudinal.
+4. Empenamento (arqueamento, encanoamento, torção) exige visão de borda/topo ou referência de superfície plana. Se houver apenas uma foto frontal chapada sem curvatura lateral visível, defina status como 'inconclusivo_angulo_foto' e tipo como 'indeterminado_sem_vista_topo'.
+5. Se a imagem estiver muito tremida, escura ou sem a régua de referência quando exigida, marque qualidade_imagem_suficiente=False e conformidade='INCONCLUSIVO_FOTO_INADEQUADA'.
 """
 
 
@@ -164,7 +177,6 @@ def localizar_imagens_para_processar(caminhos_informados: list[str]) -> list[Pat
                 raise FileNotFoundError(f"Arquivo não encontrado: {arq}")
         return arquivos
 
-    # Se nenhum caminho foi passado, busca automaticamente imagens na pasta do projeto
     candidatos = [
         p for p in BASE_DIR.iterdir()
         if p.is_file() and p.suffix.lower() in EXTENSOES_ACEITAS
@@ -174,7 +186,6 @@ def localizar_imagens_para_processar(caminhos_informados: list[str]) -> list[Pat
             f"Nenhuma imagem ({', '.join(EXTENSOES_ACEITAS)}) encontrada em {BASE_DIR}"
         )
 
-    # Processa a imagem mais recente colocada na pasta
     candidatos.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return [candidatos[0]]
 
@@ -185,10 +196,6 @@ def renomear_e_padronizar_imagem(
     lote_id: str,
     max_lado: int = 1024,
 ) -> tuple[Path, types.Part]:
-    """
-    Renomeia a foto para um padrão seguro (sem espaços ou caracteres especiais),
-    arquiva na pasta 'inspecoes_processadas' e retorna os bytes JPEG otimizados.
-    """
     PASTA_PROCESSADAS.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -197,17 +204,12 @@ def renomear_e_padronizar_imagem(
 
     with Image.open(caminho_origem) as img:
         img_corrigida = ImageOps.exif_transpose(img).convert("RGB")
-
-        # Salva a cópia renomeada em alta qualidade para auditoria do backend
         img_corrigida.save(destino_renomeado, format="JPEG", quality=92)
-
-        # Cria versão reduzida em memória para envio rápido à API
         img_corrigida.thumbnail((max_lado, max_lado), Image.Resampling.LANCZOS)
         buffer = io.BytesIO()
         img_corrigida.save(buffer, format="JPEG", quality=85)
         bytes_api = buffer.getvalue()
 
-    # Remove o arquivo original solto na raiz (ou mantém se já estava na pasta processadas)
     if caminho_origem.parent == BASE_DIR and caminho_origem != destino_renomeado:
         try:
             caminho_origem.unlink()
@@ -281,7 +283,7 @@ def executar_inspecao(caminhos_entrada: list[str]) -> RespostaBackend:
         )
         conteudo = [
             *parts_imagens,
-            "Realize a inspeção física desta peça de madeira e preencha o laudo técnico estruturado.",
+            "Realize a inspeção física desta peça de madeira, detecte e utilize a régua de 30cm para calibrar as dimensões reais, e preencha o laudo técnico estruturado.",
         ]
 
         ultimo_erro = None
@@ -323,7 +325,7 @@ def executar_inspecao(caminhos_entrada: list[str]) -> RespostaBackend:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Motor de Inspeção de Madeira com Renomeação Automática e Saída JSON."
+        description="Motor de Inspeção de Madeira com Calibração por Régua de 30cm e Saída JSON."
     )
     parser.add_argument(
         "imagens",
@@ -334,7 +336,6 @@ def main() -> None:
 
     resultado = executar_inspecao(args.imagens)
 
-    # Garante saída UTF-8 limpa no terminal do Windows para o backend consumir
     sys.stdout.reconfigure(encoding="utf-8")
     print(json.dumps(resultado.model_dump(), indent=2, ensure_ascii=False))
 
