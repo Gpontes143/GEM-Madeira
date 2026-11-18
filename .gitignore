@@ -3,5 +3,4 @@ __pycache__/
 *.pyc
 venv/
 .venv/\
-.env.example
 /inspecoes_processadas
