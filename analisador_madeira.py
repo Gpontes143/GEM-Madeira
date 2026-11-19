@@ -23,20 +23,45 @@ ENV_PATH = BASE_DIR / ".env"
 PASTA_PROCESSADAS = BASE_DIR / "inspecoes_processadas"
 EXTENSOES_ACEITAS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
+
 # --- 2. Contratos de Dados (Pydantic Schemas) ---
-class DimensoesEscalaRegua(BaseModel):
-    comprimento_cm: Optional[float] = Field(
-        None, ge=0, description="Comprimento estimado da peça em centímetros, calculado usando a régua de 30cm como base."
-    )
-    largura_cm: Optional[float] = Field(
-        None, ge=0, description="Largura estimada da peça em centímetros, calculada usando a régua de 30cm como base."
-    )
+class CalibracaoEDimensoesPeca(BaseModel):
     regua_30cm_detectada: bool = Field(
-        description="True se a régua padrão de 30cm foi encontrada na imagem para calibração métrica."
+        description="True se houver uma régua de 30 cm visível na imagem; False caso contrário (não invalida a análise)."
+    )
+    comprimento_regua_pixels: Optional[float] = Field(
+        None,
+        gt=0,
+        description="Comprimento total ocupado pelos 30 cm da régua na imagem, medido em pixels. Null se não houver régua.",
+    )
+    fator_conversao_px_para_cm: Optional[float] = Field(
+        None,
+        description="Fator calculado automaticamente (30.0 / comprimento_regua_pixels).",
+    )
+    comprimento_peca_pixels: Optional[float] = Field(
+        None,
+        ge=0,
+        description="Comprimento estimado da peça de madeira em pixels.",
+    )
+    largura_peca_pixels: Optional[float] = Field(
+        None,
+        ge=0,
+        description="Largura estimada da peça de madeira em pixels.",
+    )
+    comprimento_peca_cm: Optional[float] = Field(
+        None,
+        ge=0,
+        description="Comprimento da peça em cm (calculado automaticamente se a régua foi detectada).",
+    )
+    largura_peca_cm: Optional[float] = Field(
+        None,
+        ge=0,
+        description="Largura da peça em cm (calculado automaticamente se a régua foi detectada).",
     )
     observacao_escala: str = Field(
-        description="Breve relato sobre a leitura da régua e a proporção aplicada."
+        description="Relato curto sobre a medição em pixels e se houve calibração por régua de 30 cm."
     )
+
 
 class EstatisticasFendas(BaseModel):
     quantidade: int = Field(
@@ -56,6 +81,26 @@ class EstatisticasFendas(BaseModel):
         "bordas",
         "multiplas_regioes",
     ]
+    maior_fenda_comprimento_pixels: Optional[float] = Field(
+        None,
+        ge=0,
+        description="Comprimento da maior fenda/rachadura medido em pixels (0 se não houver fendas).",
+    )
+    maior_fenda_largura_pixels: Optional[float] = Field(
+        None,
+        ge=0,
+        description="Abertura (largura máxima) da maior fenda/rachadura medida em pixels (0 se não houver fendas).",
+    )
+    maior_fenda_comprimento_cm: Optional[float] = Field(
+        None,
+        ge=0,
+        description="Comprimento da maior fenda em cm (calculado automaticamente quando houver régua).",
+    )
+    maior_fenda_largura_cm: Optional[float] = Field(
+        None,
+        ge=0,
+        description="Abertura (largura máxima) da maior fenda em cm (calculada automaticamente quando houver régua).",
+    )
     extensao_relativa_percentual: float = Field(
         ge=0,
         le=100,
@@ -111,9 +156,9 @@ class AnaliseEmpenamento(BaseModel):
 
 class LaudoTecnicoMadeira(BaseModel):
     qualidade_imagem_suficiente: bool = Field(
-        description="True se a foto permite inspecionar a madeira; False se inadequada.",
+        description="True se a foto permite inspecionar a madeira (mesmo sem régua); False apenas se estiver muito escura, desfocada ou obstruída.",
     )
-    dimensoes: DimensoesEscalaRegua
+    dimensoes: CalibracaoEDimensoesPeca
     fendas: EstatisticasFendas
     nos: EstatisticasNos
     empenamento: AnaliseEmpenamento
@@ -127,12 +172,54 @@ class LaudoTecnicoMadeira(BaseModel):
         "INCONCLUSIVO_FOTO_INADEQUADA",
     ]
 
+    @model_validator(mode="after")
+    def calcular_conversao_pixels_para_cm(self) -> "LaudoTecnicoMadeira":
+        # Zera medidas de fenda caso nenhuma fenda tenha sido detectada
+        if self.fendas.quantidade == 0:
+            self.fendas.maior_fenda_comprimento_pixels = 0.0
+            self.fendas.maior_fenda_largura_pixels = 0.0
+            self.fendas.extensao_relativa_percentual = 0.0
+
+        esc = self.dimensoes
+        if (
+            esc.regua_30cm_detectada
+            and esc.comprimento_regua_pixels is not None
+            and esc.comprimento_regua_pixels > 0
+        ):
+            fator = 30.0 / esc.comprimento_regua_pixels
+            esc.fator_conversao_px_para_cm = round(fator, 5)
+
+            if esc.comprimento_peca_pixels is not None:
+                esc.comprimento_peca_cm = round(esc.comprimento_peca_pixels * fator, 2)
+            if esc.largura_peca_pixels is not None:
+                esc.largura_peca_cm = round(esc.largura_peca_pixels * fator, 2)
+
+            if self.fendas.maior_fenda_comprimento_pixels is not None:
+                self.fendas.maior_fenda_comprimento_cm = round(
+                    self.fendas.maior_fenda_comprimento_pixels * fator, 2
+                )
+            if self.fendas.maior_fenda_largura_pixels is not None:
+                self.fendas.maior_fenda_largura_cm = round(
+                    self.fendas.maior_fenda_largura_pixels * fator, 2
+                )
+        else:
+            esc.regua_30cm_detectada = False
+            esc.comprimento_regua_pixels = None
+            esc.fator_conversao_px_para_cm = None
+            esc.comprimento_peca_cm = None
+            esc.largura_peca_cm = None
+            self.fendas.maior_fenda_comprimento_cm = None
+            self.fendas.maior_fenda_largura_cm = None
+
+        return self
+
 
 class RespostaBackend(BaseModel):
     sucesso: bool
     timestamp_iso: str
     arquivos_originais: list[str]
     arquivos_renomeados: list[str]
+    resolucao_enviada_pixels: list[str]
     modelo_utilizado: Optional[str] = None
     tempo_processamento_segundos: float
     laudo: Optional[LaudoTecnicoMadeira] = None
@@ -140,17 +227,20 @@ class RespostaBackend(BaseModel):
 
 
 # --- 3. Regras de Negócio e Segurança ---
-
 SYSTEM_PROMPT = """
 Você é um inspetor técnico sênior de qualidade de madeira serrada e beneficiada.
-Analise as imagens fornecidas buscando não conformidades físicas (fendas, nós, empenamento) E UTILIZANDO A RÉGUA DE 30CM COMO BASE DE ESCALA.
+Analise as imagens fornecidas buscando não conformidades físicas (fendas/rachaduras, nós e empenamento), realizando todas as medições espaciais primeiramente em PIXELS com base na resolução informada de cada imagem.
 
 Regras técnicas obrigatórias:
-1. **Calibração por Régua Física (30cm):** Localize a régua padrão de 30 cm posicionada na imagem. Utilize as marcações dela como referência absoluta de escala para calcular com precisão métrica o comprimento e a largura reais da peça. Se a régua não for encontrada, defina `regua_30cm_detectada=false`.
-2. Não confunda veios naturais escuros, variações de cerne/alburno ou marcas normais de serra com fendas.
-3. Fendas têm abertura física ou sombra de profundidade longitudinal.
-4. Empenamento (arqueamento, encanoamento, torção) exige visão de borda/topo ou referência de superfície plana. Se houver apenas uma foto frontal chapada sem curvatura lateral visível, defina status como 'inconclusivo_angulo_foto' e tipo como 'indeterminado_sem_vista_topo'.
-5. Se a imagem estiver muito tremida, escura ou sem a régua de referência quando exigida, marque qualidade_imagem_suficiente=False e conformidade='INCONCLUSIVO_FOTO_INADEQUADA'.
+1. Medição em Pixels Primeiro: Utilize a resolução exata em pixels informada no prompt (largura x altura px) como sistema de coordenadas para estimar as medidas em pixels:
+   - Comprimento e largura da peça de madeira (`comprimento_peca_pixels`, `largura_peca_pixels`).
+   - Comprimento e abertura/largura da maior fenda ou rachadura (`maior_fenda_comprimento_pixels`, `maior_fenda_largura_pixels`).
+2. Régua de 30 cm Opcional (Referência de Escala):**
+   - A régua NÃO é obrigatória. Se não houver régua na imagem, defina `regua_30cm_detectada=false`, preencha normalmente todas as medidas em pixels e realize a inspeção completa sem marcar a foto como inadequada.
+   - Se houver uma régua de 30 cm próxima à peça ou à rachadura, defina `regua_30cm_detectada=true` e informe com precisão quantos pixels correspondem aos 30 cm da régua em `comprimento_regua_pixels` (o sistema fará a conversão matemática de pixels para centímetros automaticamente).
+3. Diferenciação de Defeitos: Não confunda veios naturais escuros, variações de cerne/alburno ou marcas normais de serra com fendas. Fendas possuem abertura física ou sombra de profundidade longitudinal.
+4. Empenamento: Exige visão de borda/topo ou referência de superfície plana. Se houver apenas foto frontal chapada sem curvatura lateral visível, defina status como 'inconclusivo_angulo_foto' e tipo como 'indeterminado_sem_vista_topo'.
+5. Qualidade da Imagem: Marque `qualidade_imagem_suficiente=False` e `conformidade='INCONCLUSIVO_FOTO_INADEQUADA'` APENAS se a imagem estiver excessivamente tremida, escura ou obstruída a ponto de impedir a visualização da superfície da madeira.
 """
 
 
@@ -195,7 +285,7 @@ def renomear_e_padronizar_imagem(
     indice: int,
     lote_id: str,
     max_lado: int = 1024,
-) -> tuple[Path, types.Part]:
+) -> tuple[Path, types.Part, tuple[int, int]]:
     PASTA_PROCESSADAS.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -206,6 +296,7 @@ def renomear_e_padronizar_imagem(
         img_corrigida = ImageOps.exif_transpose(img).convert("RGB")
         img_corrigida.save(destino_renomeado, format="JPEG", quality=92)
         img_corrigida.thumbnail((max_lado, max_lado), Image.Resampling.LANCZOS)
+        dimensoes_enviadas = img_corrigida.size  # (largura_px, altura_px)
         buffer = io.BytesIO()
         img_corrigida.save(buffer, format="JPEG", quality=85)
         bytes_api = buffer.getvalue()
@@ -217,7 +308,7 @@ def renomear_e_padronizar_imagem(
             shutil.move(str(caminho_origem), str(destino_renomeado))
 
     part = types.Part.from_bytes(data=bytes_api, mime_type="image/jpeg")
-    return destino_renomeado, part
+    return destino_renomeado, part, dimensoes_enviadas
 
 
 def listar_modelos_candidatos(client: genai.Client) -> list[str]:
@@ -257,6 +348,7 @@ def executar_inspecao(caminhos_entrada: list[str]) -> RespostaBackend:
     lote_id = uuid.uuid4().hex[:6]
     originais_str: list[str] = []
     renomeados_str: list[str] = []
+    resolucoes_str: list[str] = []
 
     try:
         api_key = obter_api_key_segura()
@@ -264,9 +356,17 @@ def executar_inspecao(caminhos_entrada: list[str]) -> RespostaBackend:
         originais_str = [arq.name for arq in arquivos]
 
         parts_imagens: list[types.Part] = []
+        detalhes_resolucao: list[str] = []
+
         for idx, arq in enumerate(arquivos, start=1):
-            caminho_novo, part = renomear_e_padronizar_imagem(arq, idx, lote_id)
+            caminho_novo, part, (largura_px, altura_px) = renomear_e_padronizar_imagem(
+                arq, idx, lote_id
+            )
             renomeados_str.append(str(caminho_novo.relative_to(BASE_DIR)))
+            resolucoes_str.append(f"{largura_px}x{altura_px}")
+            detalhes_resolucao.append(
+                f"- Vista {idx} ({arq.name}): resolução exata de {largura_px} pixels de largura por {altura_px} pixels de altura."
+            )
             parts_imagens.append(part)
 
         client = genai.Client(
@@ -281,10 +381,15 @@ def executar_inspecao(caminhos_entrada: list[str]) -> RespostaBackend:
             response_schema=LaudoTecnicoMadeira,
             temperature=0.1,
         )
-        conteudo = [
-            *parts_imagens,
-            "Realize a inspeção física desta peça de madeira, detecte e utilize a régua de 30cm para calibrar as dimensões reais, e preencha o laudo técnico estruturado.",
-        ]
+
+        prompt_usuario = (
+            "Realize a inspeção física desta peça de madeira.\n"
+            "Dimensões das imagens enviadas para referência de medição em pixels:\n"
+            + "\n".join(detalhes_resolucao)
+            + "\n\nMeça a peça e a maior rachadura em pixels. Se houver uma régua de 30 cm visível, informe também o comprimento dela em pixels; se não houver régua, siga a inspeção normalmente."
+        )
+
+        conteudo = [*parts_imagens, prompt_usuario]
 
         ultimo_erro = None
         for modelo in modelos:
@@ -300,6 +405,7 @@ def executar_inspecao(caminhos_entrada: list[str]) -> RespostaBackend:
                         timestamp_iso=datetime.now().isoformat(timespec="seconds"),
                         arquivos_originais=originais_str,
                         arquivos_renomeados=renomeados_str,
+                        resolucao_enviada_pixels=resolucoes_str,
                         modelo_utilizado=modelo,
                         tempo_processamento_segundos=round(time.time() - inicio, 2),
                         laudo=response.parsed,
@@ -316,6 +422,7 @@ def executar_inspecao(caminhos_entrada: list[str]) -> RespostaBackend:
             timestamp_iso=datetime.now().isoformat(timespec="seconds"),
             arquivos_originais=originais_str,
             arquivos_renomeados=renomeados_str,
+            resolucao_enviada_pixels=resolucoes_str,
             modelo_utilizado=None,
             tempo_processamento_segundos=round(time.time() - inicio, 2),
             laudo=None,
@@ -325,7 +432,7 @@ def executar_inspecao(caminhos_entrada: list[str]) -> RespostaBackend:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Motor de Inspeção de Madeira com Calibração por Régua de 30cm e Saída JSON."
+        description="Motor de Inspeção de Madeira com Medição em Pixels e Calibração Opcional por Régua de 30cm."
     )
     parser.add_argument(
         "imagens",
