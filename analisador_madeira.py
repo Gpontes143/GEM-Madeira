@@ -31,7 +31,7 @@ class CalibracaoEDimensoesPeca(BaseModel):
     )
     comprimento_regua_pixels: Optional[float] = Field(
         None,
-        gt=0,
+        ge=0,
         description="Comprimento total ocupado pelos 30 cm da régua na imagem, medido em pixels. Null se não houver régua.",
     )
     fator_conversao_px_para_cm: Optional[float] = Field(
@@ -233,11 +233,11 @@ Analise as imagens fornecidas buscando não conformidades físicas (fendas/racha
 
 Regras técnicas obrigatórias:
 1. Medição em Pixels Primeiro: Utilize a resolução exata em pixels informada no prompt (largura x altura px) como sistema de coordenadas para estimar as medidas em pixels:
-   - Comprimento e largura da peça de madeira (`comprimento_peca_pixels`, `largura_peca_pixels`).
-   - Comprimento e abertura/largura da maior fenda ou rachadura (`maior_fenda_comprimento_pixels`, `maior_fenda_largura_pixels`).
+  - Comprimento e largura da peça de madeira (`comprimento_peca_pixels`, `largura_peca_pixels`).
+  - Comprimento e abertura/largura da maior fenda ou rachadura (`maior_fenda_comprimento_pixels`, `maior_fenda_largura_pixels`).
 2. Régua de 30 cm Opcional (Referência de Escala):**
-   - A régua NÃO é obrigatória. Se não houver régua na imagem, defina `regua_30cm_detectada=false`, preencha normalmente todas as medidas em pixels e realize a inspeção completa sem marcar a foto como inadequada.
-   - Se houver uma régua de 30 cm próxima à peça ou à rachadura, defina `regua_30cm_detectada=true` e informe com precisão quantos pixels correspondem aos 30 cm da régua em `comprimento_regua_pixels` (o sistema fará a conversão matemática de pixels para centímetros automaticamente).
+  - A régua NÃO é obrigatória. Se não houver régua na imagem, defina `regua_30cm_detectada=false`, preencha normalmente todas as medidas em pixels e realize a inspeção completa sem marcar a foto como inadequada.
+  - Se houver uma régua de 30 cm próxima à peça ou à rachadura, defina `regua_30cm_detectada=true` e informe com precisão quantos pixels correspondem aos 30 cm da régua em `comprimento_regua_pixels` (o sistema fará a conversão matemática de pixels para centímetros automaticamente).
 3. Diferenciação de Defeitos: Não confunda veios naturais escuros, variações de cerne/alburno ou marcas normais de serra com fendas. Fendas possuem abertura física ou sombra de profundidade longitudinal.
 4. Empenamento: Exige visão de borda/topo ou referência de superfície plana. Se houver apenas foto frontal chapada sem curvatura lateral visível, defina status como 'inconclusivo_angulo_foto' e tipo como 'indeterminado_sem_vista_topo'.
 5. Qualidade da Imagem: Marque `qualidade_imagem_suficiente=False` e `conformidade='INCONCLUSIVO_FOTO_INADEQUADA'` APENAS se a imagem estiver excessivamente tremida, escura ou obstruída a ponto de impedir a visualização da superfície da madeira.
